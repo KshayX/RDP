@@ -8,133 +8,38 @@ jobs:
     steps:
       - name: Configure macOS Screen Sharing
         run: |
-          # Enable Screen Sharing and Remote Management
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          # Enable Screen Sharing (more reliable method)
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
           
-          # Enable Remote Desktop
+          # Enable Remote Management
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -allowAccessFor -allUsers -privs -all -restart -agent -menu 2>/dev/null || true
+            -activate -configure -allowAccessFor -allUsers -restart -agent || true
 
-      - name: Create Admin User
+      - name: Create Admin User (Simplified)
         run: |
-          # Generate secure password
-          password=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
-          echo "Generated secure password"
+          # Generate password
+          password=$(openssl rand -base64 12 | tr -d "=+/")
           
-          # Get next available UID
-          uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
-          uid=$((uid + 1))
-          
-          # Create user account
-          sudo dscl . -create /Users/RDP
-          sudo dscl . -create /Users/RDP UserShell /bin/bash
-          sudo dscl . -create /Users/RDP RealName "RDP User"  
-          sudo dscl . -create /Users/RDP UniqueID $uid
-          sudo dscl . -create /Users/RDP PrimaryGroupID 20
-          sudo dscl . -create /Users/RDP NFSHomeDirectory /Users/RDP
-          sudo dscl . -passwd /Users/RDP "$password"
-          
-          # Add to admin group
-          sudo dseditgroup -o edit -a RDP -t user admin
-          sudo dseditgroup -o edit -a RDP -t user _appserverusr
-          sudo dseditgroup -o edit -a RDP -t user _appserveradm
-          
-          # Create home directory
-          sudo mkdir -p /Users/RDP
-          sudo chown RDP:staff /Users/RDP
+          # Use sysadminctl (more reliable than dscl on GitHub runners)
+          sudo sysadminctl -addUser RDP -fullName "RDP User" -password "$password" -admin
           
           # Configure for Screen Sharing
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -users RDP -access -on -privs -all 2>/dev/null || true
+            -configure -users RDP -access -on -privs -all || true
           
           echo "RDP_CREDS=User: RDP | Password: $password" >> $GITHUB_ENV
 
-      - name: Install Tailscale (Homebrew Method)
+      - name: Install Tailscale (Direct Download)
         run: |
-          # Install Homebrew if not present
-          if ! command -v brew &> /dev/null; then
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
-            eval "$(/opt/homebrew/bin/brew shellenv)"
-          fi
+          # Download Tailscale directly (avoid Homebrew complexity)
+          curl -L -o /tmp/tailscale.tgz https://pkgs.tailscale.com/stable/tailscale_1.76.1_darwin_amd64.tgz
           
-          # Install Tailscale via Homebrew (most reliable method)
-          brew install tailscale
+          cd /tmp
+          tar xzf tailscale.tgz
           
-          # Start tailscaled service  
-          sudo brew services start tailscale
-
-      - name: Establish Tailscale Connection
-        run: |
-          # Wait for tailscaled to be ready
-          sleep 10
+          # Install binaries
+          sudo cp tailscale_*/tailscale /usr/local/bin/
+          sudo cp tailscale_*/tailscaled /usr/local/bin/
           
-          # Connect to Tailscale
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$GITHUB_RUN_ID
-          
-          # Wait for IP assignment
-          for i in {1..20}; do
-            tsIP=$(tailscale ip -4 2>/dev/null)
-            if [ ! -z "$tsIP" ]; then
-              echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
-              echo "Tailscale connected with IP: $tsIP"
-              break
-            fi
-            echo "Waiting for Tailscale IP... attempt $i/20"
-            sleep 5
-          done
-          
-          if [ -z "$tsIP" ]; then
-            echo "Failed to get Tailscale IP"
-            exit 1
-          fi
-
-      - name: Configure VNC Access
-        run: |
-          # Configure VNC settings
-          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt VNCLegacyConnectionsEnabled -bool true
-          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt ScreenSharingReqPermEnabled -bool false
-          
-          # Restart Screen Sharing service
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          
-          # Enable auto-login for easier access
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser RDP
-
-      - name: Verify Connectivity  
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          
-          # Test VNC port
-          if nc -z $TAILSCALE_IP 5900 2>/dev/null; then
-            echo "✅ VNC port 5900 is accessible"
-          else
-            echo "⚠️  VNC port test inconclusive (may still work)"
-          fi
-          
-          # Show network status
-          tailscale status
-
-      - name: Display Connection Info & Keep Alive
-        run: |
-          echo ""
-          echo "╔══════════════════════════════════════╗"
-          echo "║            macOS VNC ACCESS          ║"
-          echo "╠══════════════════════════════════════╣"
-          echo "║ Address: $TAILSCALE_IP:5900          ║"
-          echo "║ Username: RDP                        ║"
-          echo "║ $RDP_CREDS"
-          echo "║                                      ║"
-          echo "║ Use any VNC client to connect        ║"
-          echo "║ (RealVNC, TightVNC, macOS Screen     ║"
-          echo "║  Sharing, etc.)                      ║"
-          echo "╚══════════════════════════════════════╝"
-          echo ""
-          
-          # Keep runner alive
-          while true; do
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🟢 macOS VNC Server Active"
-            sleep 300
-          done
+          # Start tailscaled in background
+          sudo /usr/local/bin/tailscaled &
