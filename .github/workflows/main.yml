@@ -8,87 +8,55 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Install Microsoft Remote Desktop (RDP server for macOS)
-          brew install --cask microsoft-remote-desktop
-          
-          # Enable Screen Sharing as fallback
+          # Enable Screen Sharing (VNC server)
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
           
-          # Install FreeRDP server (alternative RDP solution)
-          brew install freerdp
-          
-          # Configure firewall for RDP port 3389
-          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
-          
+          # Configure firewall 
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off || true
+
       - name: Create RDP User with Secure Password  
         run: |
-          # Generate secure password (same logic as Windows version)
-          chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*'
-          password=""
-          for i in {1..16}; do
-            password+="${chars:RANDOM%${#chars}:1}"
-          done
+          # Generate secure password
+          password=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
           
-          # Create admin user (simplified version that works)
+          # Create admin user
           sudo sysadminctl -addUser RDP -fullName "RDP User" -password "$password" -admin
           
           echo "RDP_CREDS=User: RDP | Password: $password" >> $GITHUB_ENV
-          
-          # Verify user was created
-          if ! id RDP; then
-            echo "User creation failed"
-            exit 1
-          fi
 
-      - name: Install Tailscale
-        run: |
-          # Download and install Tailscale (fixed URL)
-          curl -o /tmp/tailscale.pkg https://pkgs.tailscale.com/stable/Tailscale-1.82.0-macos.pkg
-          sudo installer -pkg /tmp/tailscale.pkg -target /
-          rm /tmp/tailscale.pkg
+      - name: Install Tailscale (Official GitHub Action)
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
-      - name: Establish Tailscale Connection
+      - name: Get Tailscale IP
         run: |
-          # Start Tailscale daemon
-          sudo /Applications/Tailscale.app/Contents/MacOS/Tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          tsIP=""
-          retries=0
-          while [ -z "$tsIP" ] && [ $retries -lt 10 ]; do
-              tsIP=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4)
-              sleep 5
-              retries=$((retries + 1))
-          done
-          
-          if [ -z "$tsIP" ]; then
-              echo "Tailscale IP not assigned. Exiting."
-              exit 1
-          fi
+          # Get Tailscale IP
+          tsIP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+          echo "Tailscale IP: $tsIP"
 
       - name: Verify RDP Accessibility
         run: |
           echo "Tailscale IP: $TAILSCALE_IP"
           
-          # Test RDP port connectivity (port 3389)
-          if nc -z $TAILSCALE_IP 3389; then
-              echo "RDP connectivity successful!"
+          # Test VNC port (5900) 
+          if nc -z $TAILSCALE_IP 5900; then
+              echo "VNC connectivity successful!"
           else
-              echo "RDP connection test failed - but may still work"
+              echo "VNC connection test failed - but may still work"
           fi
 
       - name: Maintain Connection
         run: |
           echo ""
           echo "=== RDP ACCESS ==="
-          echo "Address: $TAILSCALE_IP:3389"
+          echo "Address: $TAILSCALE_IP:5900 (VNC)"
           echo "Username: RDP"  
           echo "$RDP_CREDS"
           echo "=================="
           echo ""
           
-          # Keep runner active indefinitely (or until manually cancelled)
           while true; do
               echo "[$(date)] RDP Active - Use Ctrl+C in workflow to terminate"
               sleep 300
