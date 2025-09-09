@@ -1,0 +1,97 @@
+name: RDP
+on:
+  workflow_dispatch:
+jobs:
+  secure-rdp:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Screen Sharing (VNC server)
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          
+          # Enable Remote Desktop
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -restart -agent -menu
+
+      - name: Create RDP User with Secure Password
+        run: |
+          # Generate secure password
+          password=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+          
+          # Create new admin user
+          sudo dscl . -create /Users/RDP
+          sudo dscl . -create /Users/RDP UserShell /bin/bash
+          sudo dscl . -create /Users/RDP RealName "RDP User"
+          sudo dscl . -create /Users/RDP UniqueID 1001
+          sudo dscl . -create /Users/RDP PrimaryGroupID 80
+          sudo dscl . -create /Users/RDP NFSHomeDirectory /Users/RDP
+          sudo dscl . -passwd /Users/RDP "$password"
+          sudo dseditgroup -o edit -a RDP -t user admin
+          sudo createhomedir -c -u RDP
+          
+          # Configure for Remote Desktop
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -users RDP -access -on -privs -all
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          curl -o /tmp/tailscale.tgz https://pkgs.tailscale.com/stable/tailscale_1.82.0_darwin_amd64.tgz
+          cd /tmp && tar -xzf tailscale.tgz
+          sudo cp tailscale_1.82.0_darwin_amd64/tailscale /usr/local/bin/
+          sudo cp tailscale_1.82.0_darwin_amd64/tailscaled /usr/local/bin/
+          
+          # Start tailscaled
+          sudo /usr/local/bin/tailscaled &
+          sleep 5
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          sudo /usr/local/bin/tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          tsIP=""
+          retries=0
+          while [ -z "$tsIP" ] && [ $retries -lt 10 ]; do
+              tsIP=$(sudo /usr/local/bin/tailscale ip -4)
+              sleep 5
+              retries=$((retries + 1))
+          done
+          
+          if [ -z "$tsIP" ]; then
+              echo "Tailscale IP not assigned. Exiting."
+              exit 1
+          fi
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          
+          # Test VNC port connectivity
+          if nc -z $TAILSCALE_IP 5900; then
+              echo "VNC connectivity successful!"
+          else
+              echo "VNC connection test failed"
+              exit 1
+          fi
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "=== RDP ACCESS ==="
+          echo "Address: $TAILSCALE_IP:5900 (VNC)"
+          echo "Username: RDP"
+          echo "$RDP_CREDS"
+          echo "=================="
+          echo ""
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while true; do
+              echo "[$(date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              sleep 300
+          done
